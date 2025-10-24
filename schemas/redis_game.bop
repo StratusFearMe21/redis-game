@@ -1,0 +1,10 @@
+struct KeyValue {
+  string key;
+  int64 value;
+}
+
+message GameMessage {
+  1 -> KeyValue[] updates;
+  2 -> KeyValue[] clicks;
+  3 -> bool clear;
+}
