@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, net::SocketAddr, time::Duration};
 
 use axum::{
     Router,
@@ -38,6 +38,15 @@ struct Cli {
     command: Option<Command>,
     #[command(flatten)]
     verbose: clap_verbosity_flag::Verbosity<InfoLevel>,
+    #[arg(
+        short,
+        long,
+        env = "REDIS_URL",
+        default_value = "redis://localhost?protocol=resp3"
+    )]
+    redis_url: String,
+    #[arg(short, long, env = "LISTEN_ADDR", default_value = "[::]:3000")]
+    listen_addr: SocketAddr,
 }
 
 #[derive(Subcommand)]
@@ -54,7 +63,7 @@ async fn main() -> eyre::Result<()> {
 
     color_eyre::install()?;
 
-    let redis_client = Client::open("redis://localhost?protocol=resp3").unwrap();
+    let redis_client = Client::open(cli.redis_url.as_str()).unwrap();
 
     let registry = tracing_subscriber::registry()
         .with(ErrorLayer::default())
@@ -77,7 +86,9 @@ async fn main() -> eyre::Result<()> {
             let mut connection = redis_client
                 .get_multiplexed_async_connection()
                 .await
-                .wrap_err("Failed to open redis connection")?;
+                .wrap_err_with(|| {
+                    format!("Failed to open redis connection at `{}`", cli.redis_url)
+                })?;
 
             for _ in 0..num {
                 let id = nanoid::nanoid!();
@@ -114,11 +125,10 @@ async fn main() -> eyre::Result<()> {
                 .layer(CatchPanicLayer::custom(error::PanicHandler))
                 .with_state(redis_client);
 
-            let addr = "[::]:3000".parse::<std::net::SocketAddr>().unwrap();
-            let listener = TcpListener::bind(addr)
+            let listener = TcpListener::bind(cli.listen_addr)
                 .await
-                .wrap_err_with(|| format!("Failed to open listener on {}", addr))?;
-            tracing::info!("Listening on {}", addr);
+                .wrap_err_with(|| format!("Failed to open listener on {}", cli.listen_addr))?;
+            tracing::info!("Listening on {}", cli.listen_addr);
             axum::serve(listener, app.into_make_service())
                 .with_graceful_shutdown(shutdown_signal())
                 .await

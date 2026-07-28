@@ -7,7 +7,7 @@ edition = "2024"
 ansi-to-html = { version = "0.2.2", features = ["lazy-init"] }
 axum = { version = "0.8.6", features = ["ws"] }
 bebop = "3.2.3"
-clap = { version = "4.5.50", features = ["derive"] }
+clap = { version = "4.5.50", features = ["derive", "env"] }
 clap-verbosity-flag = { version = "3.0.4", features = ["tracing"] }
 color-eyre = "0.6.5"
 futures-util = "0.3.31"
