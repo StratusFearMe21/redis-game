@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use harmonica::spring::Spring;
 use num_enum::FromPrimitive;
 use rand::{Rng, TryRngCore, rand_core::UnwrapErr, rngs::OsRng, seq::SliceRandom};
 use web_time::Instant;
@@ -15,7 +16,7 @@ use arc_swap::ArcSwap;
 use bebop::Record;
 use egui::{
     Align2, Color32, CornerRadius, FontId, Frame, Pos2, Rect, RichText, Sense, Vec2,
-    emath::inverse_lerp,
+    emath::inverse_lerp, lerp,
 };
 use futures_util::{SinkExt, StreamExt};
 use indexmap::IndexMap;
@@ -25,14 +26,18 @@ use ws_stream_wasm::{WsMessage, WsMeta};
 
 use crate::messages::redis_game::{GameMessage, KeyValue};
 
+const SPRING_TARGET_X: f32 = 5.0;
+
 struct CellAnimation {
-    animation_start: Instant,
+    x_spring: Spring,
+    y_spring: Spring,
 }
 
 impl CellAnimation {
     fn new() -> Self {
         Self {
-            animation_start: Instant::now(),
+            x_spring: Spring::new(1.0 / 60.0, 6.0, 0.5, 0.0, SPRING_TARGET_X),
+            y_spring: Spring::new(1.0 / 60.0, 6.0, 0.5, 0.0, 0.0),
         }
     }
 }
@@ -271,14 +276,19 @@ impl eframe::App for TemplateApp {
                                 egui::StrokeKind::Middle,
                             );
                             if let Some(((name, score), animation_state)) = map_iter.next() {
+                                let mut target_y = 0.0;
+                                let mut target_x = 0.0;
                                 if hovered
                                     && (xz_pressed
                                         || ui.input(|i| i.pointer.any_click())
-                                        || (self.powerup == Some(Powerup::Autoclick)
-                                            && self.autoclick_instant.elapsed().as_millis() > 50))
+                                        || (matches!(
+                                            self.powerup,
+                                            Some(Powerup::Autoclick | Powerup::Random)
+                                        ) && self.autoclick_instant.elapsed().as_millis() > 50))
                                 {
-                                    self.autoclick_instant = Instant::now();
-                                    animation_state.animation_start = Instant::now();
+                                    target_x =
+                                        self.rng.random_range(-SPRING_TARGET_X..SPRING_TARGET_X);
+                                    target_y = self.rng.random_range(0.0..SPRING_TARGET_X);
                                     if name == &self.label
                                         || (ui.input(|i| i.modifiers.ctrl)
                                             && grid_cell_pointer_pos == Some((x, y)))
@@ -292,18 +302,22 @@ impl eframe::App for TemplateApp {
                                 }
                                 ui.painter().text(
                                     Pos2::new(
-                                        grid_cell.rect.min.x + grid_cell.rect.width() / 2.0,
-                                        grid_cell.rect.min.y,
+                                        lerp(
+                                            (grid_cell.rect.min.x + grid_cell.rect.width() / 2.0)
+                                                ..=(grid_cell.rect.max.x
+                                                    - grid_cell.rect.width() / 4.0),
+                                            animation_state.x_spring.update(target_x).0,
+                                        ),
+                                        lerp(
+                                            grid_cell.rect.min.y
+                                                ..=(grid_cell.rect.min.y
+                                                    + grid_cell.rect.height() / 2.0),
+                                            animation_state.y_spring.update(target_y).0,
+                                        ),
                                     ),
                                     Align2::CENTER_TOP,
                                     name,
-                                    FontId::proportional(keyframe::ease_with_scaled_time(
-                                        functions::EaseInCubic,
-                                        72.0,
-                                        54.0,
-                                        animation_state.animation_start.elapsed().as_secs_f64(),
-                                        0.1,
-                                    )),
+                                    FontId::proportional(54.0),
                                     ui.style().visuals.text_color(),
                                 );
                                 ui.painter().text(
@@ -313,19 +327,14 @@ impl eframe::App for TemplateApp {
                                     ),
                                     Align2::CENTER_BOTTOM,
                                     format!("{}", score.load(Ordering::Relaxed)),
-                                    FontId::proportional(keyframe::ease_with_scaled_time(
-                                        functions::EaseInCubic,
-                                        32.0,
-                                        24.0,
-                                        animation_state.animation_start.elapsed().as_secs_f64(),
-                                        0.1,
-                                    )),
+                                    FontId::proportional(24.0),
                                     ui.style().visuals.text_color(),
                                 );
                             }
                         }
                     }
                     if !clicks.is_empty() {
+                        self.autoclick_instant = Instant::now();
                         self.click_sender.send(clicks).unwrap();
                     }
                     if joined {
@@ -377,7 +386,7 @@ impl eframe::App for TemplateApp {
                         let label = self.label.clone();
                         let (tx, rx) = flume::unbounded();
                         self.click_sender = tx;
-                        self.leaderboard = self.label == "Bradshaw";
+                        self.leaderboard = self.label.to_lowercase() == "bradshaw";
                         self.show_powerup_window = !self.leaderboard;
                         wasm_bindgen_futures::spawn_local(websocket(
                             joined, error, people, label, rx,

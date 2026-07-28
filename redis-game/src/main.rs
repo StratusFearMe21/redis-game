@@ -11,6 +11,8 @@ use axum::{
     routing::get,
 };
 use bebop::Record;
+use clap::{Parser, Subcommand};
+use clap_verbosity_flag::InfoLevel;
 use color_eyre::eyre::{self, Context, OptionExt, eyre};
 use redis::{AsyncConnectionConfig, AsyncTypedCommands, Client, PushInfo, Value};
 use tokio::{
@@ -19,6 +21,7 @@ use tokio::{
     time::{self, Instant},
 };
 use tower_http::{catch_panic::CatchPanicLayer, services::ServeDir};
+use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -27,48 +30,101 @@ use crate::error::WithStatusCode;
 mod error;
 mod messages;
 
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+#[command(propagate_version = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    verbose: clap_verbosity_flag::Verbosity<InfoLevel>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Populate {
+        #[clap(default_value = "40")]
+        num: u32,
+    },
+}
+
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    let cli = Cli::parse();
+
     color_eyre::install()?;
 
     let redis_client = Client::open("redis://localhost?protocol=resp3").unwrap();
-    redis_client
-        .get_multiplexed_async_connection()
-        .await
-        .wrap_err("Failed to open redis connection")?
-        .flushall()
-        .await
-        .wrap_err("Failed to flushall the database")?;
 
-    tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(ErrorLayer::default())
-        .with(
-            EnvFilter::try_from_default_env()
-                .or_else(|_| EnvFilter::try_new("info"))
-                .unwrap(),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+        .with(tracing_subscriber::fmt::layer());
 
-    let app = Router::new()
-        .route("/ws", get(game_server))
-        .fallback_service(
-            ServeDir::new("dist")
-                .precompressed_gzip()
-                .precompressed_br(),
-        )
-        .layer(CatchPanicLayer::custom(error::PanicHandler))
-        .with_state(redis_client);
+    if cli.verbose.is_present() {
+        registry.with(LevelFilter::from(cli.verbose)).init()
+    } else {
+        registry
+            .with(
+                EnvFilter::try_from_default_env()
+                    .or_else(|_| EnvFilter::try_new("info"))
+                    .unwrap(),
+            )
+            .init()
+    }
 
-    let addr = "[::]:3000".parse::<std::net::SocketAddr>().unwrap();
-    let listener = TcpListener::bind(addr)
-        .await
-        .wrap_err_with(|| format!("Failed to open listener on {}", addr))?;
-    tracing::info!("Listening on {}", addr);
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .wrap_err("Failed to serve make service")
+    match cli.command {
+        Some(Command::Populate { num }) => {
+            let mut connection = redis_client
+                .get_multiplexed_async_connection()
+                .await
+                .wrap_err("Failed to open redis connection")?;
+
+            for _ in 0..num {
+                let id = nanoid::nanoid!();
+
+                connection
+                    .set(&id, 50_000)
+                    .await
+                    .wrap_err("Failed to set key for random player")?;
+
+                connection
+                    .publish("joins", id)
+                    .await
+                    .wrap_err("Failed to publish join for random player")?;
+            }
+
+            Ok(())
+        }
+        None => {
+            redis_client
+                .get_multiplexed_async_connection()
+                .await
+                .wrap_err("Failed to open redis connection")?
+                .flushall()
+                .await
+                .wrap_err("Failed to flushall the database")?;
+
+            let app = Router::new()
+                .route("/ws", get(game_server))
+                .fallback_service(
+                    ServeDir::new("dist")
+                        .precompressed_gzip()
+                        .precompressed_br(),
+                )
+                .layer(CatchPanicLayer::custom(error::PanicHandler))
+                .with_state(redis_client);
+
+            let addr = "[::]:3000".parse::<std::net::SocketAddr>().unwrap();
+            let listener = TcpListener::bind(addr)
+                .await
+                .wrap_err_with(|| format!("Failed to open listener on {}", addr))?;
+            tracing::info!("Listening on {}", addr);
+            axum::serve(listener, app.into_make_service())
+                .with_graceful_shutdown(shutdown_signal())
+                .await
+                .wrap_err("Failed to serve make service")
+        }
+    }
 }
 
 async fn game_server(
@@ -105,7 +161,7 @@ async fn handle_socket(socket: &mut WebSocket, pool: Client) -> Result<(), error
             .with_status_code(StatusCode::BAD_REQUEST);
     };
 
-    let bradshaw = name == "Bradshaw";
+    let bradshaw = name == "Bradshaw" || name == "Diaz";
 
     if !bradshaw {
         db.set(name.as_str(), 0i32)
@@ -176,6 +232,7 @@ async fn handle_socket(socket: &mut WebSocket, pool: Client) -> Result<(), error
             }
             _ = &mut sleep => {
                 let mut key_values = Vec::new();
+                // We're not the first player to join
                 if !keys_to_watch.is_empty() {
                     let values = db
                         .mget_ints(&keys_to_watch)
