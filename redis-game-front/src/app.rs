@@ -421,7 +421,7 @@ async fn websocket(
 ) {
     let (_connection_meta, connection) = match WsMeta::connect(
         format!(
-            "ws://{}/ws",
+            "wss://{}/redis-game/ws",
             web_sys::window()
                 .unwrap()
                 .window()

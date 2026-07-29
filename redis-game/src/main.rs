@@ -116,7 +116,7 @@ async fn main() -> eyre::Result<()> {
                 .wrap_err("Failed to flushall the database")?;
 
             let app = Router::new()
-                .route("/ws", get(game_server))
+                .route("/redis-game/ws", get(game_server))
                 .fallback_service(
                     ServeDir::new("dist")
                         .precompressed_gzip()
